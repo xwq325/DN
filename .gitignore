@@ -1,0 +1,5 @@
+/dataset/test/
+/dataset/train/
+/model/ours.py
+/model/attention.py
+/TripoSR/
