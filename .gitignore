@@ -1,5 +1,6 @@
-/dataset/test/
-/dataset/train/
+*.jpg
+*.bmp
+*.png
 /model/ours.py
 /model/attention.py
 /TripoSR/
