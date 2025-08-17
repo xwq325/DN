@@ -148,7 +148,7 @@ class Art_nosie_Dataset(Dataset):  # 添加人工噪声
 
         filelist.sort()
         # 使用列表推导式过滤出图片文件
-        image_extensions = ['.jpg', '.jpeg', '.png', '.gif']
+        image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp']
         filelist = [file for file in filelist if any(file.lower().endswith(ext) for ext in image_extensions)]
 
         for img_name in filelist:

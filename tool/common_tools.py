@@ -17,7 +17,6 @@ class ModelTrainer(object):
             ori_img, nos_img = data
             # 将数据和标签传到GPU上
             ori_img, nos_img = ori_img.to(device), nos_img.to(device)
-
             # 获得output
             outputs = model(nos_img)
             # 在计算下下一个min-batch之前，先将上一个batch的梯度清零

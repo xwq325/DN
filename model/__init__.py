@@ -19,9 +19,9 @@ class Model(nn.Module):
 
         if model is None or isinstance(model, str):
             module = import_module('model.' + args.model_name.lower())
-            self.model = module.make_model(args).to(self.device)
+            self.model = module.make_model(args)
         else:
-            self.model = model.to(self.device)
+            self.model = model
             print("Model is Created!")
 
         if self.mode == 'train':
@@ -33,7 +33,7 @@ class Model(nn.Module):
                         os.path.join(self.args.dir_model, 'pretrain', self.args.model_name, self.args.pretrain)),
                     strict=False)
 
-            #self.model = nn.DataParallel(self.model.to(self.device), device_ids=[i for i in range(self.n_GPUs)])
+            self.model = nn.DataParallel(self.model, device_ids=[i for i in range(self.n_GPUs)])
 
         elif self.mode == 'test':
 
@@ -54,13 +54,15 @@ class Model(nn.Module):
 
                     self.model.load_state_dict(new_dict, strict=True)
 
-                #self.model = nn.DataParallel(self.model.to(self.device), device_ids=[i for i in range(self.n_GPUs)])
+            #self.model = nn.DataParallel(self.model), device_ids=[i for i in range(self.n_GPUs)])
             self.model.eval()
+
+        self.model = self.model.to(self.device)
 
     def forward(self, x, sigma=None):
         if self.mode == 'train':
-            if self.args.n_GPUs > 1:
-                return P.data_parallel(self.model, x, range(self.args.n_GPUs))
+            #if self.args.n_GPUs > 1:
+                #return P.data_parallel(self.model, x, range(self.args.n_GPUs))
             return self.model(x)
         elif self.mode == 'test':
             return self.forward_chop(x)
