@@ -7,7 +7,7 @@ import numpy as np
 import torch.optim as optim
 from option import args
 from datetime import datetime
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset
 from torch.optim.lr_scheduler import MultiStepLR
 from tool.MyDataSet import Art_nosie_Dataset
 from tool.MyDataSet import Real_Dataset
@@ -37,8 +37,14 @@ elif args.n_colors == 1:
 else:
     raise ValueError("args.n_color must equal 1 or 3 in interage")
 
-train_dir = args.dir_data + os.path.join('train', args.train_dataset)
-test_dir = args.dir_data + os.path.join('test', args.test_dataset)
+def _parse_datasets(ds: str):
+    return [x.strip() for x in str(ds).split('+') if str(x).strip()]
+
+_train_ds_names = _parse_datasets(args.train_dataset)
+_test_ds_names = _parse_datasets(args.test_dataset)
+
+train_dirs = [os.path.join(args.dir_data, 'train', name) for name in _train_ds_names]
+test_dirs = [os.path.join(args.dir_data, 'test', name) for name in _test_ds_names]
 save_model_dir = args.save_base + os.path.join(args.dir_model)
 save_state_dir = args.save_base + os.path.join(args.dir_state)
 save_loss_dir = args.save_base + os.path.join(args.dir_loss)
@@ -50,7 +56,7 @@ def log(*args, **kwargs):
     print(datetime.now().strftime("%Y-%m-%d %H:%M:%S:"), *args, **kwargs)
 
 
-def test(args, data_loader, save_test_dir, save=False, model_file=None):
+def test(args, data_loader, save_test_dir, save=False, model_file=None, dataset_name: str = None):
     args.mode = 'test'
 
     import model
@@ -80,9 +86,23 @@ def test(args, data_loader, save_test_dir, save=False, model_file=None):
             nos_img = nos_img.to(device)
             output = _model(nos_img)
 
+        # Move tensors to CPU for metric computation and visualization
         output = output.cpu()
         nos_img = nos_img.cpu()
 
+        # Normalize to [0,1] for IQA metrics (pyiqa expects inputs in [0,1])
+        output_for_metric = output.float() / args.rgb_range
+        ori_for_metric = ori_img.float() / args.rgb_range
+        output_for_metric = output_for_metric.clamp(0.0, 1.0)
+        ori_for_metric = ori_for_metric.clamp(0.0, 1.0)
+
+        # Compute metrics on normalized tensors
+        psnr_x_ = calculate_psnr(output_for_metric, ori_for_metric)
+        ssim_x_ = calculate_ssim(output_for_metric, ori_for_metric)
+        fsim_x_ = calculate_fsim(output_for_metric, ori_for_metric)
+        lpips_x_ = calculate_lpips(output_for_metric, ori_for_metric)
+
+        # Prepare tensors for saving images
         output = output.squeeze_()
         ori_img = ori_img.squeeze_()
         nos_img = nos_img.squeeze_()
@@ -95,11 +115,6 @@ def test(args, data_loader, save_test_dir, save=False, model_file=None):
             output = output.permute(1, 2, 0)  # chw --> hwc
             ori_img = ori_img.permute(1, 2, 0)  # chw --> hwc
             nos_img = nos_img.permute(1, 2, 0)  # chw --> hwc
-            
-        psnr_x_ = calculate_psnr(output, ori_img)
-        ssim_x_ = calculate_ssim(output, ori_img)
-        fsim_x_ = calculate_fsim(output, ori_img)
-        lpips_x_ = calculate_lpips(output, ori_img)
 
         np_output = np.uint8(output.detach().clamp(0, 255).round().numpy())  # tensor --> np(intenger)
         np_img_rgb = np.uint8(ori_img.detach().clamp(0, 255).round().numpy())  # tensor --> np(intenger)
@@ -135,7 +150,8 @@ def test(args, data_loader, save_test_dir, save=False, model_file=None):
         now_time = datetime.now()
         time_str = datetime.strftime(now_time, '%m-%d_%H-%M')
 
-        save_path = os.path.join(save_test_dir, args.model_name, color, str(args.sigma), args.test_dataset)
+        ds_part = dataset_name if dataset_name else args.test_dataset
+        save_path = os.path.join(save_test_dir, args.model_name, color, str(args.sigma), ds_part)
 
         if not os.path.exists(save_path):  # 没有该文件夹，则创建该文件夹
             os.makedirs(save_path)
@@ -173,13 +189,18 @@ def train(args):
     BATCH_SIZE = args.batch_size
 
     # ====================================step 1/5data========================================================
-    # 构建MyDataset实例
-    train_data = My_Dataset(args, data_dir=train_dir, mode='train')
-    test_data = My_Dataset(args, data_dir=test_dir, mode='test')
+    # 多训练集：使用多个 My_Dataset 并合并
+    train_datasets = [My_Dataset(args, data_dir=tdir, mode='train') for tdir in train_dirs]
+    train_data = ConcatDataset(train_datasets) if len(train_datasets) > 1 else train_datasets[0]
 
-    # 构建DataLoder
+    # 多测试集：分别构建各自的 DataLoader
+    test_loaders = []
+    for tdir, name in zip(test_dirs, _test_ds_names):
+        ds = My_Dataset(args, data_dir=tdir, mode='test')
+        test_loaders.append((name, DataLoader(dataset=ds, batch_size=1, shuffle=False)))
+
+    # 构建Train DataLoder
     train_loader = DataLoader(dataset=train_data, batch_size=BATCH_SIZE, shuffle=True)
-    test_loader = DataLoader(dataset=test_data, batch_size=1, shuffle=False)
 
     # ===================================step2/5 model========================================================
     import model
@@ -283,11 +304,17 @@ def train(args):
             time_str = datetime.strftime(now_time, '%m-%d-%H:%M:%S')
             print(time_str)
 
-            psnr_avg, ssim_avg = test(args,
-                                      test_loader,
-                                      save_test_dir,
-                                      save=True,
-                                      model_file=_model)
+            # 逐个测试集评测；第一个测试集作为验证集写入日志
+            val_psnr, val_ssim = None, None
+            for idx, (ds_name, tl) in enumerate(test_loaders):
+                cur_psnr, cur_ssim = test(args,
+                                          tl,
+                                          save_test_dir,
+                                          save=True,
+                                          model_file=_model,
+                                          dataset_name=ds_name)
+                if idx == 0:
+                    val_psnr, val_ssim = cur_psnr, cur_ssim
 
             if not os.path.exists(os.path.join(save_loss_dir, args.model_name, color, str(args.sigma))):
                 os.makedirs(os.path.join(save_loss_dir, args.model_name, color, str(args.sigma)))
@@ -298,7 +325,9 @@ def train(args):
 
             save_to_file(os.path.join(save_loss_dir, args.model_name, color, str(args.sigma), 'train_result.txt'),
                          "\nTime: {}, Epoch: {},  Loss: {:.4f}, psnr: {:.4f},  ssim: {:.4f}" \
-                         .format(time_str, epoch + 1, epoch_loss, psnr_avg, ssim_avg))
+                         .format(time_str, epoch + 1, epoch_loss,
+                                 0.0 if val_psnr is None else val_psnr,
+                                 0.0 if val_ssim is None else val_ssim))
         else:
             # flag 是标记消融实验的
             flag = str(args.flag)
@@ -318,12 +347,16 @@ def train(args):
             time_str = datetime.strftime(now_time, '%m-%d-%H:%M:%S')
             print(time_str)
 
-            psnr_avg, ssim_avg = test(args,
-                                      test_loader,
-                                      save_test_dir,
-                                      save=True,
-                                      model_file=_model,
-                                      )
+            val_psnr, val_ssim = None, None
+            for idx, (ds_name, tl) in enumerate(test_loaders):
+                cur_psnr, cur_ssim = test(args,
+                                          tl,
+                                          save_test_dir,
+                                          save=True,
+                                          model_file=_model,
+                                          dataset_name=ds_name)
+                if idx == 0:
+                    val_psnr, val_ssim = cur_psnr, cur_ssim
 
             if not os.path.exists(os.path.join(save_loss_dir, args.model_name, flag)):  # 没有问该文件夹，则创建该文件夹
                 os.makedirs(os.path.join(save_loss_dir, args.model_name, flag))
@@ -331,13 +364,15 @@ def train(args):
                 f.close()
                 print("Make the dir: {}".format(os.path.join(save_loss_dir, args.model_name, flag, 'train_result.txt')))
 
-            # 保存loss
+            # 保存loss（第一个测试集作为验证集）
             save_to_file(os.path.join(save_loss_dir, args.model_name, flag, 'train_result.txt'),
                          "\nTime: {}, Epoch: {},  Loss: {:.4f}, psnr: {:.4f},  ssim: {:.4f}" \
-                         .format(time_str, epoch + 1, epoch_loss, psnr_avg, ssim_avg))
+                         .format(time_str, epoch + 1, epoch_loss,
+                                 0.0 if val_psnr is None else val_psnr,
+                                 0.0 if val_ssim is None else val_ssim))
         if args.debug:
             writer.add_scalars("Loss by epoch", {"Train": epoch_loss}, epoch + 1)
-            writer.add_scalars("PSNR", {"Valid": psnr_avg}, epoch + 1)
+            writer.add_scalars("PSNR", {"Valid": 0.0 if 'val_psnr' not in locals() or val_psnr is None else val_psnr}, epoch + 1)
 
 if __name__ == '__main__':
     torch.manual_seed(args.seed)
@@ -353,14 +388,16 @@ if __name__ == '__main__':
     elif args.mode == 'test':
         print("Start to test.......")
 
-        test_data = My_Dataset(args, data_dir=test_dir, mode='test')
-        test_loader = DataLoader(dataset=test_data, batch_size=1, shuffle=False)
+        for tdir, name in zip(test_dirs, _test_ds_names):
+            test_data = My_Dataset(args, data_dir=tdir, mode='test')
+            test_loader = DataLoader(dataset=test_data, batch_size=1, shuffle=False)
 
-        ppsnr_avg, ssim_avg = test(args,
-                                   test_loader,
-                                   save_test_dir,
-                                   save=True,
-                                   model_file=args.model_file_name)
+            ppsnr_avg, ssim_avg = test(args,
+                                       test_loader,
+                                       save_test_dir,
+                                       save=True,
+                                       model_file=args.model_file_name,
+                                       dataset_name=name)
 
     elif args.mode == 'inference':
         print("Start to inference.......")

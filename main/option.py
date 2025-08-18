@@ -14,9 +14,9 @@ parser.add_argument('--seed', type=int, default=2025,
 
 parser.add_argument('--dir_data', type=str, default='D:/Code/PythonProject/DN/dataset/',
                     help='dataset directory')
-parser.add_argument('--train_dataset', type=str, default="CBSD500",
+parser.add_argument('--train_dataset', type=str, default="WED+DIV2K+Flickr2K",
                     help='Train dataset name')
-parser.add_argument('--test_dataset', type=str, default="CBSD68",
+parser.add_argument('--test_dataset', type=str, default="CBSD68+Kodak24",
                     help='Test dataset name')
 parser.add_argument('--save_base', type=str, default='D:/Code/PythonProject/DN/',
                     help='save the value of loss per epoch')
